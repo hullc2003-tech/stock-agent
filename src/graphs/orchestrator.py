@@ -10,6 +10,7 @@ try:
     from src.agents.base import BaseAgent
     from src.core.config import settings
     from src.core.rate_limiter import YFINANCE_LIMITER, TAVILY_LIMITER, rate_limited
+    from src.core.cache import cached
 except ImportError:
     import sys
     sys.path.append(".")
@@ -18,6 +19,10 @@ except ImportError:
     from src.agents.base import BaseAgent
     from src.core.config import settings
     from src.core.rate_limiter import YFINANCE_LIMITER, TAVILY_LIMITER, rate_limited
+    from src.core.cache import cached
+
+# === tenacity for retries ===
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # === FinBERT Setup ===
 try:
@@ -41,15 +46,20 @@ except Exception as e:
 
 
 class TechnicalAnalysisAgent(BaseAgent):
-    """Research Agent #1: Technical Analysis with yfinance + rate limiting for free tier."""
+    """Research Agent #1: Technical Analysis with yfinance + rate limiting + caching + retries."""
     
     def __init__(self):
         super().__init__("TechnicalAnalysisAgent")
-        self.delay = float(os.getenv("YFINANCE_DELAY_SECONDS", "1.8"))
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
     @rate_limited(YFINANCE_LIMITER)
+    @cached(ttl_seconds=1800)  # Cache yfinance data for 30 minutes
     def _fetch_yfinance_data(self, ticker: str, period: str = "6mo"):
-        """Fetch data with built-in throttling."""
         import yfinance as yf
         stock = yf.Ticker(ticker)
         hist = stock.history(period=period)
@@ -57,7 +67,6 @@ class TechnicalAnalysisAgent(BaseAgent):
         return hist, info
     
     def _calculate_indicators(self, hist) -> Dict[str, Any]:
-        """Calculate key technical indicators."""
         import pandas as pd
         import numpy as np
         
@@ -66,24 +75,20 @@ class TechnicalAnalysisAgent(BaseAgent):
         
         close = hist["Close"]
         
-        # Simple Moving Averages
         sma_50 = close.rolling(window=50).mean().iloc[-1]
         sma_200 = close.rolling(window=200).mean().iloc[-1] if len(hist) >= 200 else sma_50
         
-        # RSI (14-period)
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs)).iloc[-1]
         
-        # Volume trend
         volume = hist["Volume"]
         avg_volume = volume.rolling(window=20).mean().iloc[-1]
         recent_volume = volume.iloc[-5:].mean()
         volume_trend = "increasing" if recent_volume > avg_volume else "decreasing"
         
-        # Price action
         current_price = close.iloc[-1]
         price_vs_sma50 = ((current_price - sma_50) / sma_50) * 100
         
@@ -103,7 +108,6 @@ class TechnicalAnalysisAgent(BaseAgent):
             hist, info = self._fetch_yfinance_data(ticker)
             indicators = self._calculate_indicators(hist)
             
-            # Simple signal logic
             signal = "BULLISH"
             confidence = 0.55
             
@@ -137,7 +141,7 @@ class TechnicalAnalysisAgent(BaseAgent):
 
 
 class SentimentAnalysisAgent(BaseAgent):
-    """Research Agent #2: Uses FinBERT on real financial news."""
+    """Research Agent #2: FinBERT + Tavily with rate limiting + caching + retries."""
     
     def __init__(self):
         super().__init__("SentimentAnalysisAgent")
@@ -149,7 +153,13 @@ class SentimentAnalysisAgent(BaseAgent):
         except:
             self.tavily = None
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=8),
+        retry=retry_if_exception_type(Exception)
+    )
     @rate_limited(TAVILY_LIMITER)
+    @cached(ttl_seconds=900)  # Cache news for 15 minutes
     def _get_recent_news(self, ticker: str, max_results: int = 8) -> List[str]:
         if not self.tavily:
             return [
