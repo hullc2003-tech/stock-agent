@@ -218,17 +218,64 @@ class SentimentAnalysisAgent(BaseAgent):
 
 
 class NewsCatalystAgent(BaseAgent):
+    """Research Agent #4: Finds real upcoming catalysts using Tavily."""
+    
     def __init__(self):
         super().__init__("NewsCatalystAgent")
+        
+        try:
+            from tavily import TavilyClient
+            self.tavily = TavilyClient(api_key=settings.tavily_api_key) if settings.tavily_api_key else None
+        except:
+            self.tavily = None
+    
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), retry=retry_if_exception_type(Exception))
+    @rate_limited(TAVILY_LIMITER)
+    @cached(ttl_seconds=1800)  # Cache catalysts for 30 min
+    def _fetch_catalysts(self, ticker: str) -> List[Dict]:
+        if not self.tavily:
+            return [{
+                "title": f"Potential major catalyst expected for {ticker}",
+                "impact": "medium",
+                "time_horizon": "24h"
+            }]
+        
+        try:
+            query = f"{ticker} upcoming catalyst OR earnings OR product launch OR acquisition OR FDA OR major news next 48 hours"
+            response = self.tavily.search(
+                query=query,
+                search_depth="advanced",
+                max_results=6,
+                include_raw_content=False
+            )
+            
+            catalysts = []
+            for result in response.get("results", [])[:5]:
+                catalysts.append({
+                    "title": result.get("title", ""),
+                    "url": result.get("url", ""),
+                    "impact": "high" if any(kw in result.get("title", "").lower() for kw in ["earnings", "launch", "acquisition", "fda"]) else "medium",
+                    "time_horizon": "24-48h"
+                })
+            return catalysts if catalysts else [{"title": "No major catalysts found in recent search", "impact": "low"}]
+        except Exception as e:
+            print(f"NewsCatalystAgent Tavily error: {e}")
+            return [{"title": f"Error fetching catalysts for {ticker}", "impact": "low"}]
     
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         ticker = state["ticker"]
+        catalysts = self._fetch_catalysts(ticker)
+        
+        high_impact = [c for c in catalysts if c.get("impact") == "high"]
+        impact_score = min(0.9, 0.5 + (len(high_impact) * 0.15))
+        
         analysis = {
             "ticker": ticker,
-            "catalysts": ["Major product launch expected soon", "Potential M&A activity"],
-            "impact_score": 0.75,
-            "time_horizon_hours": 18,
-            "reasoning": "Significant catalyst expected within next 24 hours."
+            "catalysts": catalysts,
+            "high_impact_count": len(high_impact),
+            "impact_score": round(impact_score, 2),
+            "time_horizon_hours": 24,
+            "reasoning": f"Found {len(catalysts)} potential catalysts. {len(high_impact)} high impact."
         }
         state["news_catalyst"] = analysis
         return state
@@ -263,22 +310,14 @@ class CodeWritingAgent(BaseAgent):
         os.makedirs(self.proposals_dir, exist_ok=True)
     
     def _generate_code_patch(self, suggestion: str, context: str = "") -> str:
-        """Use LLM to generate a code change based on the suggestion."""
         from langchain_openai import ChatOpenAI
         from langchain_core.messages import SystemMessage, HumanMessage
         
-        llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.2,
-            api_key=settings.openai_api_key
-        )
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=settings.openai_api_key)
         
         system_prompt = """You are an expert Python developer working on a multi-agent stock prediction system.
-        
         Given a suggested improvement, generate a clean, minimal code change.
-        Return ONLY the new or modified function/class code. Do not include explanations outside the code block.
-        
-        If the change is complex, provide the full updated class or function."""
+        Return ONLY the new or modified function/class code. Do not include explanations outside the code block."""
         
         messages = [
             SystemMessage(content=system_prompt),
@@ -289,7 +328,6 @@ class CodeWritingAgent(BaseAgent):
         return response.content.strip()
     
     def _save_proposal(self, suggestion: str, generated_code: str):
-        """Save the proposed change to a file for review."""
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         safe_name = suggestion[:50].replace(" ", "_").replace("/", "_")
         filename = f"{self.proposals_dir}/{timestamp}_{safe_name}.md"
@@ -313,29 +351,23 @@ Review this change carefully before applying it to the source code.
         
         with open(filename, "w") as f:
             f.write(content)
-        
         return filename
     
     def _send_error_email(self, error_msg: str, suggestion: str):
-        """Send error report to configured email (placeholder for now)."""
         print(f"[CodeWritingAgent] ERROR EMAIL would be sent to {settings.error_email}")
         print(f"Suggestion: {suggestion}")
         print(f"Error: {error_msg}")
-        # TODO: Implement real SMTP sending using settings.smtp_* variables
+        # TODO: Implement real SMTP sending
     
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         suggestions = state.get("suggested_improvements", [])
         applied_changes = []
         
-        for suggestion in suggestions[:3]:  # Limit to first 3 suggestions per run
+        for suggestion in suggestions[:3]:
             try:
-                # Generate code change
                 generated_code = self._generate_code_patch(suggestion)
-                
-                # Save as proposal instead of auto-applying (safer)
                 proposal_file = self._save_proposal(suggestion, generated_code)
                 applied_changes.append(f"Generated proposal: {proposal_file}")
-                
             except Exception as e:
                 error_msg = str(e)
                 self._send_error_email(error_msg, suggestion)
