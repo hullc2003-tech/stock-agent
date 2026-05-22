@@ -17,3 +17,5 @@ numpy>=1.24.0
 slowapi>=0.1.9
 python-multipart>=0.0.6
 tenacity>=8.2.0
+transformers>=4.41.0
+torch>=2.3.0
