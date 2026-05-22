@@ -3,6 +3,7 @@ from typing import Dict, Any, Literal, List
 from datetime import datetime
 import uuid
 import os
+import json
 
 try:
     from src.core.state import StockAgentState
@@ -51,14 +52,9 @@ class TechnicalAnalysisAgent(BaseAgent):
     def __init__(self):
         super().__init__("TechnicalAnalysisAgent")
     
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(Exception),
-        reraise=True
-    )
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception), reraise=True)
     @rate_limited(YFINANCE_LIMITER)
-    @cached(ttl_seconds=1800)  # Cache yfinance data for 30 minutes
+    @cached(ttl_seconds=1800)
     def _fetch_yfinance_data(self, ticker: str, period: str = "6mo"):
         import yfinance as yf
         stock = yf.Ticker(ticker)
@@ -74,7 +70,6 @@ class TechnicalAnalysisAgent(BaseAgent):
             return {"error": "Insufficient data"}
         
         close = hist["Close"]
-        
         sma_50 = close.rolling(window=50).mean().iloc[-1]
         sma_200 = close.rolling(window=200).mean().iloc[-1] if len(hist) >= 200 else sma_50
         
@@ -153,28 +148,16 @@ class SentimentAnalysisAgent(BaseAgent):
         except:
             self.tavily = None
     
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=8),
-        retry=retry_if_exception_type(Exception)
-    )
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), retry=retry_if_exception_type(Exception))
     @rate_limited(TAVILY_LIMITER)
-    @cached(ttl_seconds=900)  # Cache news for 15 minutes
+    @cached(ttl_seconds=900)
     def _get_recent_news(self, ticker: str, max_results: int = 8) -> List[str]:
         if not self.tavily:
-            return [
-                f"{ticker} reports strong quarterly earnings beat expectations",
-                f"Analysts upgrade {ticker} citing AI growth momentum"
-            ]
+            return [f"{ticker} reports strong quarterly earnings beat expectations"]
         
         try:
             query = f"{ticker} stock news latest earnings OR catalyst OR analyst rating"
-            response = self.tavily.search(
-                query=query,
-                search_depth="advanced",
-                max_results=max_results,
-                include_raw_content=False
-            )
+            response = self.tavily.search(query=query, search_depth="advanced", max_results=max_results, include_raw_content=False)
             headlines = [r.get("title", "") for r in response.get("results", [])]
             return [h for h in headlines if h][:max_results]
         except Exception as e:
@@ -183,11 +166,7 @@ class SentimentAnalysisAgent(BaseAgent):
     
     def _analyze_with_finbert(self, texts: List[str]) -> Dict[str, Any]:
         if not texts or not self.use_finbert:
-            return {
-                "overall_sentiment": "NEUTRAL",
-                "score": 0.0,
-                "reasoning": "FinBERT not available or no text."
-            }
+            return {"overall_sentiment": "NEUTRAL", "score": 0.0, "reasoning": "FinBERT not available or no text."}
         
         try:
             results = _finbert_classifier(texts)
@@ -266,19 +245,103 @@ class LearningAgent(BaseAgent):
         if suggestions:
             state["suggested_improvements"].extend([
                 "Add MACD and Bollinger Bands to Technical Agent.",
-                "Cache Tavily results to reduce API calls."
+                "Improve NewsCatalystAgent with real data sources."
             ])
         return state
 
 
 class CodeWritingAgent(BaseAgent):
+    """Code Writing Agent: Receives suggestions and generates/applies code changes.
+    
+    For safety in early versions, it generates patches and writes them to
+    a proposals directory instead of auto-modifying source files.
+    """
+    
     def __init__(self):
         super().__init__("CodeWritingAgent")
+        self.proposals_dir = "proposed_changes"
+        os.makedirs(self.proposals_dir, exist_ok=True)
+    
+    def _generate_code_patch(self, suggestion: str, context: str = "") -> str:
+        """Use LLM to generate a code change based on the suggestion."""
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import SystemMessage, HumanMessage
+        
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0.2,
+            api_key=settings.openai_api_key
+        )
+        
+        system_prompt = """You are an expert Python developer working on a multi-agent stock prediction system.
+        
+        Given a suggested improvement, generate a clean, minimal code change.
+        Return ONLY the new or modified function/class code. Do not include explanations outside the code block.
+        
+        If the change is complex, provide the full updated class or function."""
+        
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Suggestion: {suggestion}\n\nCurrent relevant context:\n{context[:1500] if context else 'No specific context provided.'}")
+        ]
+        
+        response = llm.invoke(messages)
+        return response.content.strip()
+    
+    def _save_proposal(self, suggestion: str, generated_code: str):
+        """Save the proposed change to a file for review."""
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        safe_name = suggestion[:50].replace(" ", "_").replace("/", "_")
+        filename = f"{self.proposals_dir}/{timestamp}_{safe_name}.md"
+        
+        content = f"""# Proposed Code Change
+
+**Generated at:** {datetime.utcnow().isoformat()}
+
+**Suggestion:**
+{suggestion}
+
+## Generated Code / Patch
+
+```python
+{generated_code}
+```
+
+## Instructions
+Review this change carefully before applying it to the source code.
+"""
+        
+        with open(filename, "w") as f:
+            f.write(content)
+        
+        return filename
+    
+    def _send_error_email(self, error_msg: str, suggestion: str):
+        """Send error report to configured email (placeholder for now)."""
+        print(f"[CodeWritingAgent] ERROR EMAIL would be sent to {settings.error_email}")
+        print(f"Suggestion: {suggestion}")
+        print(f"Error: {error_msg}")
+        # TODO: Implement real SMTP sending using settings.smtp_* variables
     
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         suggestions = state.get("suggested_improvements", [])
-        if suggestions:
-            state["code_changes_applied"] = [f"Improvement queued: {s[:70]}..." for s in suggestions[:2]]
+        applied_changes = []
+        
+        for suggestion in suggestions[:3]:  # Limit to first 3 suggestions per run
+            try:
+                # Generate code change
+                generated_code = self._generate_code_patch(suggestion)
+                
+                # Save as proposal instead of auto-applying (safer)
+                proposal_file = self._save_proposal(suggestion, generated_code)
+                applied_changes.append(f"Generated proposal: {proposal_file}")
+                
+            except Exception as e:
+                error_msg = str(e)
+                self._send_error_email(error_msg, suggestion)
+                applied_changes.append(f"Failed on suggestion: {suggestion[:60]}... Error: {error_msg[:80]}")
+        
+        state["code_changes_applied"] = applied_changes
         return state
 
 
