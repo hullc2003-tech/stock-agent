@@ -1,0 +1,1 @@
+FULL production config.py
