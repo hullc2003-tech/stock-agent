@@ -13,14 +13,32 @@
 ## Features
 - ≥52% accuracy enforced in tests
 - Fully self-improving (Learning → Code Writing loop)
-- Production FastAPI ready for Azure
+- Production FastAPI ready
 - Rate limiting + error handling
 
-## Quick Start
+## Quick Start (Local)
 ```bash
 pip install -r requirements.txt
 export OPENAI_API_KEY=sk-...
-uvicorn main:app --reload
+uvicorn src.api:app --reload
 ```
 
-See full deployment guide in the conversation history or ask me for Azure steps.
+## Deployment
+
+### Google Cloud Run (Recommended)
+
+This repo is fully prepared for Google Cloud Run.
+
+**Easiest method**: Use the Google Cloud Console → "Continuously deploy from a repository" (see [DEPLOYMENT.md](DEPLOYMENT.md) for full steps).
+
+Your repository already includes:
+- Production `Dockerfile`
+- Pre-configured `cloudbuild.yaml` for Cloud Build + Cloud Run
+
+**Alternative**: GitHub Actions workflow in `.github/workflows/deploy-to-cloud-run.yml`
+
+Full instructions, production recommendations, and troubleshooting are in **[DEPLOYMENT.md](DEPLOYMENT.md)**.
+
+---
+
+See full deployment guide in the conversation history or ask me for Azure steps if needed.
