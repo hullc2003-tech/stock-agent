@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  stock-agent:
+    build: .
+    container_name: stock-agent
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./performance_logs:/app/performance_logs
+      - ./proposed_changes:/app/proposed_changes
+    restart: unless-stopped
+    command: python main.py NVDA
